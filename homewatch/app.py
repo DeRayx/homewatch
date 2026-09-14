@@ -16,6 +16,8 @@ import time
 from datetime import datetime, timezone
 from email.message import EmailMessage
 
+from homewatch.capture import take_photo
+
 from dotenv import load_dotenv
 from PIL import Image, ImageChops, ImageFilter
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,6 +28,7 @@ LOG = logging.getLogger("homewatch")
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     capture_interval: float = Field(default=5, ge=1)
+    camera_settle_ms: int = Field(default=1000, ge=100, le=4000)
     pixel_threshold: int = Field(default=25, ge=1, le=255)
     changed_fraction: float = Field(default=0.02, gt=0, le=1)
     analysis_cooldown: float = Field(default=30, ge=1)
@@ -190,7 +193,6 @@ def run(config, state, dry_run):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if not dry_run:
             validate_env()
-        from picamera2 import Picamera2
         stop = threading.Event()
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, lambda *_: stop.set())
@@ -200,47 +202,45 @@ def run(config, state, dry_run):
         if (state / "last_email.txt").exists():
             float((state / "last_email.txt").read_text())
         thread = threading.Thread(target=worker, args=(events, stop, config, state, dry_run))
-        with Picamera2() as camera:
-            camera.configure(camera.create_still_configuration(main={"size": (1280, 960)}))
-            camera.start()
-            stop.wait(2)
-            thread.start()
-            previous, previous_generation = None, None
-            LOG.info("Capture started; away mode is controlled by arm/disarm")
-            try:
-                while not stop.is_set():
-                    started = time.monotonic()
-                    generation = armed_generation(state)
-                    if generation is None:
-                        previous, previous_generation = None, None
-                    else:
-                        current = camera.capture_image("main").convert("RGB")
-                        if previous_generation != generation:
-                            previous = None
-                        fraction = (motion_fraction(previous, current, config.pixel_threshold)
-                                    if previous is not None else 1.0)
-                        LOG.info("Changed pixels: %.2f%%", fraction * 100)
-                        # First armed frame is also checked, including an already-still person.
-                        if fraction >= config.changed_fraction:
-                            event = (jpeg(previous if previous is not None else current), jpeg(current),
-                                     datetime.now(timezone.utc).isoformat(), generation)
+        thread.start()
+        previous, previous_generation = None, None
+        LOG.info("Capture started; away mode is controlled by arm/disarm")
+        try:
+            while not stop.is_set():
+                started = time.monotonic()
+                generation = armed_generation(state)
+                if generation is None:
+                    previous, previous_generation = None, None
+                else:
+                    current = take_photo(config.camera_settle_ms)
+                    if previous_generation != generation:
+                        previous = None
+                    fraction = (motion_fraction(previous, current, config.pixel_threshold)
+                                if previous is not None else 1.0)
+                    LOG.info("Changed pixels: %.2f%%", fraction * 100)
+                    # First armed frame is also checked, including an already-still person.
+                    if fraction >= config.changed_fraction:
+                        event = (jpeg(previous if previous is not None else current), jpeg(current),
+                                 datetime.now(timezone.utc).isoformat(), generation)
+                        try:
+                            events.put_nowait(event)
+                        except queue.Full:
                             try:
-                                events.put_nowait(event)
-                            except queue.Full:
-                                try:
-                                    events.get_nowait()
-                                    events.task_done()
-                                except queue.Empty:
-                                    pass
-                                events.put_nowait(event)
-                        previous, previous_generation = current, generation
-                    if not thread.is_alive():
-                        raise RuntimeError("Analysis worker stopped")
-                    stop.wait(max(0, config.capture_interval - (time.monotonic() - started)))
-            finally:
-                stop.set()
-                thread.join()
-                camera.stop()
+                                events.get_nowait()
+                                events.task_done()
+                            except queue.Empty:
+                                pass
+                            events.put_nowait(event)
+                    previous, previous_generation = current, generation
+                if not thread.is_alive():
+                    raise RuntimeError("Analysis worker stopped")
+                elapsed = time.monotonic() - started
+                if elapsed > config.capture_interval:
+                    LOG.warning("Capture cycle took %.1fs, longer than the %.1fs target", elapsed, config.capture_interval)
+                stop.wait(max(0, config.capture_interval - elapsed))
+        finally:
+            stop.set()
+            thread.join()
 
 
 def main():
