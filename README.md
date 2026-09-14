@@ -1,16 +1,23 @@
 # HomeWatch
 
-A separate hobby surveillance project inspired by Intellens. Raspberry Pi Zero 2 W + Camera Module 3 → capture every five seconds → local motion filtering → GPT image assessment → email when a person is visible while away mode is enabled.
+A home camera project using a Raspberry Pi Zero 2 W and Camera Module 3, inspired by Intellens.
 
-## Hardware
+The idea is simple: take a picture every five seconds, check for movement, and send changed images to GPT. If it detects a person while away mode is on, send an email with the picture.
 
-- Raspberry Pi Zero 2 W, microSD card, stable power supply, Wi-Fi.
-- Camera Module 3 and the **standard-to-mini / Pi Zero camera cable**.
-- A stable mount and suitable enclosure. The standard Module 3 needs visible light; dark-room operation requires an appropriate lighting/camera setup.
+The code and offline tests are in place. Testing on the Pi and checking real email delivery are still to do.
 
-## Raspberry Pi installation
+## Parts
 
-Use a current Raspberry Pi OS Lite image. Connect the camera with power disconnected, then boot and verify it:
+- Raspberry Pi Zero 2 W
+- Camera Module 3 and a Pi Zero camera cable
+- microSD card, power supply, and Wi-Fi
+- A mount to keep the camera still
+
+The standard camera needs light to see the room.
+
+## Setup
+
+Install Raspberry Pi OS Lite. Connect the camera with the Pi powered off, then boot and check it:
 
 ```sh
 sudo apt update
@@ -18,7 +25,7 @@ sudo apt install -y python3-picamera2 python3-venv python3-pip
 rpicam-still -n -o camera-test.jpg
 ```
 
-Copy this project to `~/homewatch`, then:
+Put the project in `~/homewatch`:
 
 ```sh
 cd ~/homewatch
@@ -28,24 +35,29 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Edit `.env` locally. Supply an OpenAI API key and a model available to your API project that accepts image inputs and structured outputs. API usage has its own billing. Configure your email provider's SMTP host, credentials (often an app password), sender, and recipient. Multiple recipients may be comma-separated. Use `SMTP_SECURITY=ssl` with port 465, or `starttls` with port 587 as supported by your provider. Never commit `.env`.
+Fill in `.env` with:
 
-## First run
+- An OpenAI API key and a model that supports images and structured output.
+- Your SMTP server, login, sender address, and recipient address.
 
-The project starts **disarmed**. Test motion on the Pi without uploads or emails:
+Use `ssl` with port 465 or `starttls` with port 587, depending on your email provider. Some providers require an app password. Separate multiple recipients with commas. `.env` is ignored by Git. OpenAI API calls are billed separately from ChatGPT.
+
+## Run
+
+Away mode is off by default. Start with a dry run, which makes no API calls and sends no emails:
 
 ```sh
 .venv/bin/python -m homewatch arm
 .venv/bin/python -m homewatch run --dry-run
 ```
 
-Move through the scene and inspect the changed-pixel percentage. Stop with Ctrl+C. Once credentials and thresholds are configured, run live:
+Move in front of the camera and watch the motion percentages in the terminal. Stop with Ctrl+C. To use GPT and email:
 
 ```sh
 .venv/bin/python -m homewatch run
 ```
 
-From another terminal in the same project:
+Control away mode from another terminal in the project folder:
 
 ```sh
 .venv/bin/python -m homewatch status
@@ -53,23 +65,39 @@ From another terminal in the same project:
 .venv/bin/python -m homewatch arm
 ```
 
-Away mode persists across restarts. Disarming stops new event processing; requests already in flight cannot be recalled. The camera remains initialized, but the application does not request snapshots while disarmed. `status` reports away mode, not service health.
+Away mode is saved across restarts. `status` shows whether it is armed, not whether the process is running. Disarming stops new snapshots and alerts, but a network request already sent may still finish.
 
-## Behavior and tuning
+## Motion detection
 
-`config.json` controls the interval, pixel threshold (0–255 scale), minimum changed fraction, analysis/email cooldowns, and rolling hourly API limit. Defaults: five seconds, 25 brightness levels, 2% changed pixels, 30 seconds between analyses, five minutes between emails, 30 API attempts/hour. Tune using your actual scene; these are starting values, not calibrated detection guarantees.
+Comparing every pixel exactly would trigger on small lighting changes and camera noise. Instead, the code shrinks each image to 320 x 240, converts it to grayscale, and applies a blur before comparing.
 
-Images are reduced to 320×240 grayscale and blurred for comparison. Meaningful changes enqueue the previous and current JPEGs. The first capture after arming is also assessed, so an already-still person can be detected. The background worker keeps camera capture independent of API/SMTP latency. Only the latest waiting event is retained; overload replaces stale waiting images. Events suppressed by cooldown or budget are dropped.
+Defaults in `config.json`:
 
-GPT reports person presence, uncertainty, and visible evidence using structured output. Code sends email only for `person_present=true` and `uncertain=false`, while the same away session remains active. It does not identify people or infer criminal intent. The email includes the event image and a UTC capture timestamp. An uncertain result is logged and does not send email.
+| Setting | Default |
+| --- | --- |
+| Capture interval | 5 seconds |
+| Pixel brightness difference | 25 out of 255 |
+| Changed area needed | 2% |
+| Minimum time between GPT calls | 30 seconds |
+| Minimum time between emails | 5 minutes |
+| Maximum API attempts | 30 per rolling hour |
 
-API attempts and successful email timestamps persist in `state/`, including across restarts. No automatic API retries are used. API/SMTP errors are logged and the event is dropped; later motion can trigger another attempt. There is no offline backlog or guaranteed delivery. A partially accepted SMTP message can result in duplicates on a subsequent event. A process lock prevents two local capture processes sharing this state directory.
+These values still need tuning on the actual camera.
 
-Images stay in memory and are sent only for eligible events; this app does not maintain a local image archive. `store=False` is passed to OpenAI, but that is not a promise of zero provider retention. Email copies remain with your email provider. Capture every five seconds can miss brief events; lighting changes can trigger false motion. This is an experimental notification tool, not a certified alarm.
+GPT receives the previous and current images. The first image after arming is checked too, in case someone is already standing still. An email is sent only when GPT reports a person and does not mark the result uncertain. It does not identify who the person is.
+
+Capture runs separately from the network calls. If analysis falls behind, only the newest waiting event is kept. API limits and the last successful email time are saved in `state/`.
+
+## Limits
+
+- Five-second gaps can miss short events. Shadows can trigger motion.
+- GPT can get the scene wrong. Uncertain results are logged without an email.
+- Failed requests and events skipped by rate limits are dropped. There is no offline queue or automatic retry. Partial email delivery can lead to duplicate alerts later.
+- Pictures are kept in memory, not saved as a local archive. Uploaded pictures and emails are subject to the providers' retention policies. `store=False` does not guarantee zero retention.
 
 ## Start on boot
 
-Edit `deploy/homewatch.service`, replacing `YOUR_USER` and paths to match your Pi. Then:
+Edit the username and paths in `deploy/homewatch.service`, then run:
 
 ```sh
 sudo cp deploy/homewatch.service /etc/systemd/system/homewatch.service
@@ -78,24 +106,27 @@ sudo systemctl enable --now homewatch
 journalctl -u homewatch -f
 ```
 
-Use `sudo systemctl stop homewatch` to stop capture. Away mode still uses the commands above. Systemd restarts the process after failures; logs show API errors and camera failures.
+Stop it with `sudo systemctl stop homewatch`.
 
-## Offline development
+## Tests
 
-On a laptop, use a normal Python virtual environment; Picamera2 is imported only by `run`. No Pi, API credentials, or SMTP server are needed for tests:
+The tests run on a laptop without a camera or credentials. Use a normal virtual environment:
 
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m unittest discover -s tests -v
+```
+
+They cover motion filtering, API limits, alert decisions, disarming during analysis, and dry runs. To compare two local pictures:
+
+```sh
 .venv/bin/python -m homewatch compare --images before.jpg after.jpg
 ```
 
-Tests cover motion filtering, persistent rate limiting, person/uncertainty alert decisions, disarming during analysis, and dry-run network isolation. Hardware capture and live API/email delivery still require testing on your configured Pi.
+## Docs used
 
-## References
-
-- [Raspberry Pi camera hardware](https://www.raspberrypi.com/documentation/accessories/camera.html)
-- [Raspberry Pi camera software and Picamera2](https://www.raspberrypi.com/documentation/computers/camera_software.html)
+- [Raspberry Pi camera setup](https://www.raspberrypi.com/documentation/accessories/camera.html)
+- [Picamera2 and camera software](https://www.raspberrypi.com/documentation/computers/camera_software.html)
 - [OpenAI image inputs](https://developers.openai.com/api/docs/guides/images-vision)
-- [OpenAI structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
+- [OpenAI structured output](https://developers.openai.com/api/docs/guides/structured-outputs)
