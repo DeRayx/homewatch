@@ -1,0 +1,19 @@
+[Unit]
+Description=HomeWatch camera alerts
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Replace YOUR_USER in all three lines below.
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/homewatch
+ExecStart=/home/YOUR_USER/homewatch/.venv/bin/python -m homewatch run
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=100
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

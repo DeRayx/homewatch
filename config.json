@@ -1,0 +1,9 @@
+{
+  "capture_interval": 5,
+  "pixel_threshold": 25,
+  "changed_fraction": 0.02,
+  "analysis_cooldown": 30,
+  "email_cooldown": 300,
+  "max_calls_per_hour": 30,
+  "state_dir": "state"
+}
